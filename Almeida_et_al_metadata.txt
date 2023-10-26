@@ -1,0 +1,172 @@
+Metadata for Almeida et al. In Review
+
+Journal: Elementa: Science of the Anthropocene
+
+Title: Warmer, earlier, faster: Cumulative effects of Gulf of Alaska heatwaves on the early life history of Pacific cod 
+
+L. Zoe Almeida [a*], Benjamin J. Laurel [b], Hillary L. Thalmann [a], Jessica A. Miller [a]
+[a] Coastal Oregon Marine Experiment Station, Hatfield Marine Science Center, 
+Department of Fisheries and Wildlife, and Conservations Sciences, Oregon State University, 
+2030 SE Marine Science Drive, Newport, Oregon 97365, USA
+[b] Fisheries Behavioral Ecology Program, Resource Assessment and Conservation Engineering Division, 
+Alaska Fisheries Science Center, National Marine Fisheries Service, NOAA, Hatfield Marine Science Center, 
+2030 SE Marine Science Drive, Newport, OR 97365, USA
+
+ORCIDs: LZA: 0000-0003-0280-5964; JAM:  0000-0002-6491-4085
+
+*Corresponding author: 
+ZoeAlmeida@Cornell.edu
+
+
+
+
+
+
+
+The following R script files (indexed ScX) contain all analyses and plots in Almeida et al. (available in a GitHub Data Repository).
+Data files (indexed DX) that pair with the script are indicated (also available in GitHub Data Repository).
+
+[Sc1] Temperature_summary_plots_3MHWcats.R
+	[D1] 01_Dailies_w_bc_growth.csv
+	[D2] interpolatedGAK0_30m_Feb2023_JM.csv
+	[D3] interpolatedGAK100_250m_Feb2023_JM.csv
+	[D4] 03_Incubation_hatch_data.csv
+	[D5] FORANALYSIS_TridentMeans_InterpolatedData.csv
+[Sc2] Linear_BiologicalIntercept_back-calc.R
+	[D6] JulyDailies_final.csv
+[Sc3] Age-length-key.R
+	[D7] All_Pcod_collected.csv
+	[D8] July_dailies_wide_final.csv
+[Sc4] Incubation_time.R
+	[D9] 03_All_July_fish_ages_applied_lmAnnualLenKey.csv
+	[D3] interpolatedGAK100_250m_Feb2023_JM.csv
+[Sc5] Hatch_date_analyses_plots.R
+	[D9] 03_All_July_fish_ages_applied_lmAnnualLenKey.csv
+[Sc6] SL_analyses_plots.R
+	[D9] 03_All_July_fish_ages_applied_lmAnnualLenKey.csv
+[Sc7] Growth_GAMM.RMD
+	[D1] 01_Dailies_w_bc_growth.csv
+	[D2] interpolatedGAK0_30m_Feb2023_JM.csv
+	[D3] interpolatedGAK100_250m_Feb2023_JM.csv
+
+
+
+
+
+
+
+Information about the code:
++ Each script file includes code for the analyses or plots indicated. 
++ All scripts contain additional information about analyses in comments throughout, with general meta-data about the file in the header of the script.
+
+
+
+
+Information about the data:
++ All of the above data files are called into their respective R script files, with many data files being called into multiple script files.
++ Data was obtained from collections of age-0 Pacific Cod captured near Kodiak Island during 2007, 2009, 2010, 2012-2019 - see manuscript for details. 
++ Details about data formatting and variable names are below.
+
+
+
+> Temperature data
+  > Files: D2_interpolatedGAK0_30m_Feb2023_JM.csv & D3_interpolatedGAK100_250m_Feb2023_JM.csv
+	> Rows represent days
+	> Columns:
+		> Dates: Date associated with temperature in month/day/year
+		> SplineFit: Daily interpolated temperature value in degrees Celcius
+  > File: D4_03_Incubation_hatch_data.csv
+	> Rows represent individual fish IDs
+	> Columns:
+		> Year: Year of capture
+		> ID: Fish ID
+		> days.to.hatch: Number of days estimated that individual was incubating before hatching
+		> Avg.incu.temp: Average temperature in degrees Celcius over the days the fish was incubating
+		> hdate: Hatch date of the fish as the day of year
+		> hatch_DATE_noYear: Hatch date in day-month format
+  > File: D5_FORANALYSIS_TridentMeans_InterpolatedData.csv
+	> Rows represent days
+	> Columns:
+		> Date: Date associated with temperature in format of month/day/year
+		> TridentTemp: Daily temperature from Trident buoy
+		> Month: Numeric indicator of month associated with temperature
+		> Year: Year associated with temperature
+
+
+> Fish size, age, and otolith microstructure data
+  > File: D7_All_Pcod_collected.csv
+	> Rows represent individual fish IDs
+	> Columns: 
+		> FISHID: Fish ID - these match IDs in later files if the initial "BL" is removed from the ID
+		> Year: Year of capture
+		> Month: Month of capture
+		> Day: Day of capture
+		> SL_mm: Standard length of fish in millimeters
+  > File: D8_July_dailies_wide_final.csv
+	> Rows represent individual fish IDs
+	> Columns:
+		> yr: Year of capture
+		> day: Day of capture
+		> mos: Month of capture
+		> cap_doy: Day of year of capture
+		> id: Fish ID
+		> sl: Standard length of fish in millimeters
+		> radius: Otolith radius measurement in microns
+		> age: Age of the fish in days from counted increments
+		> hdate: Hatch date of the fish as the day of year
+		> 1, 2, 3...: Increment number as counted out from the core, indicative of day of life. Values in these columns are increment width measurements in microns for that day of life.
+  > File: D6_July_dailies_final.csv
+	> Rows represent otolith increments (days) within a fish, so one fish ID will be represented in multiple rows.
+	> Columns:
+		> Year: Year of capture
+		> Day: Day of capture
+		> Month: Month of capture
+		> cap_doy: Day of year of capture
+		> ID: Fish ID
+		> sl: Standard length of fish in millimeters
+		> radius: Otolith radius measurement in microns
+		> Final.Age: Age of the fish in days from counted increments
+		> hdate: Hatch date of the fish as the day of year
+		> cap_DATE: Date of capture in month/day/year format
+		> cap_DATE_noYear: Date of capture in day-month format
+		> cap_doy_corr: Day of capture in day of year format
+		> Increment: Increment number as counted out from the core, indicative of day of life. These values represent the daily age of the fish. 
+		> IW: Increment width in microns
+		> hatch_DATE: Hatch date in month/day/year format
+		> hatch_DATE_noYear: Hatch date in day-month format
+		> age_DATE: Date for when the fish was the age for which growth occurred in month/day/year format
+		> age_DATE_noYear: Date for when the fish was the age for which growth occurred in day-month format
+		> HW: Categorical indicator for if the year was considered to occur before ("pre"), during ("during"), or after marine heatwaves ("post"). These categories are altered in code to combine "during" and "post" into the "since" category
+  > File: D1_01_Dailies_w_bc_growth.csv
+	> Rows represent otolith increments (days) within a fish, so one fish ID will be represented in multiple rows.
+	> Columns:
+		> Year: Year of capture
+		> ID: Fish ID
+		> sl: Standard length of fish in millimeters
+		> radius: Otolith radius measurement in microns
+		> Increment: Increment number as counted out from the core, indicative of day of life. These values represent the daily age of the fish. 
+		> IW: Increment width in microns
+		> Final.Age: Age of the fish in days from counted increments
+		> bcSL: Back-calculated standard length of the fish at that age in millimeters
+		> bc_gr: Daily growth in millimeters from back-calculation
+		> hdate: Hatch date of the fish as the day of year
+		> hatch_DATE: Hatch date in month/day/year format
+		> hatch_DATE_noYear: Hatch date in day-month format
+		> age_DATE: Date for when the fish was the age for which growth occurred in month/day/year format
+		> age_DATE_noYear: Date for when the fish was the age for which growth occurred in day-month format
+		> HW: Categorical indicator for if the year was considered to occur before ("pre"), during ("during"), or after marine heatwaves ("post"). These categories are altered in code to combine "during" and "post" into the "since" category
+  > File: D9_03_All_July_fish_ages_applied_lmAnnual_LenKey.csv
+	> Rows represent individual fish IDs
+	> Columns:
+		> Year: Year of capture
+		> ID: Fish ID
+		> SL_mm: Standard length of fish in millimeters
+		> cap_DATE_noYear: Date of capture in day-month format
+		> cap_doy_corr: Day of capture in day of year format
+		> Final.Age: Age of the fish in days from counted increments
+		> Yearf: Year as a factor
+
+
+
+
+

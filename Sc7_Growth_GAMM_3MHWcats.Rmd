@@ -1,0 +1,1398 @@
+---
+title: "Growth GAMM"
+author: "Zoe Almeida"
+date: "3/14/2023"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+### Packages needed
+```{r packages}
+library(tidyverse)
+library(mgcv)       # GAMM package
+library(ggplot2)    # for plotting
+# remotes::install_github("stefanocoretta/tidygam") # need to use this code to install tidygam
+library(tidygam)    # for predict_gam
+library(FSA)        # to get the functionality of looking at histograms across levels of a factor
+library(rstudioapi) # for setting working directory
+```
+
+### Working directory
+```{r directory}
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+```
+
+### Input data needed
+```{r input}
+dailies <- read.csv("D1_01_Dailies_w_bc_growth.csv", header = TRUE) %>%
+  # select(-HW) %>%
+  mutate(age_doy = hdate + Increment)%>%
+  mutate(Date = as.Date(age_DATE, format = "%m/%d/%Y")) %>%
+  mutate(age_mo = format(Date, format = "%m")) #%>%
+  # mutate(HW = if_else(Year < 2015, "before", "after"))
+GAKSurf <- read.csv("D2_interpolatedGAK0_30m_Feb2023_JM.csv", header = TRUE) %>%
+  mutate(Date = as.Date(Dates, format = "%m/%d/%Y")) %>%
+  select(-Dates, -X) %>%
+  mutate(mo = as.numeric(format(Date, format = "%m"))) %>%
+  filter(mo < 8) %>%
+  select(-mo) %>%
+  rename(SurfTemp = SplineFit)
+GAKDeep <- read.csv("D3_interpolatedGAK100_250m_Feb2023_JM.csv", header = TRUE) %>%
+  mutate(Date = as.Date(Dates, format = "%m/%d/%Y")) %>%
+  select(-Dates, -X) %>%
+  mutate(mo = as.numeric(format(Date, format = "%m"))) %>%
+  filter(mo < 8) %>%
+  select(-mo) %>%
+  rename(DeepTemp = SplineFit)
+```
+
+
+### Wrangling data
+```{r wrangling}
+data_w_Surf <- left_join(dailies, GAKSurf, by = "Date")
+
+data_w_allTemp <- left_join(data_w_Surf, GAKDeep, by = "Date") %>%
+  mutate(TempApplied = if_else(Increment < 6, DeepTemp, SurfTemp)) %>% # Temp experienced is bottom temp when 5 dph or younger, then they pretty much experience surface temps
+  filter(Increment < 100) %>%  # n < 5 in each year after ages above 99 - limit to increments 99 days or younger
+  filter(hdate > 40) %>% # Removed the 2 earliest hatchers since they're so few and there's nothing in between them and the next hatch date much later
+  mutate(relGR = bc_gr/bcSL)
+
+```
+
+
+### Preliminary data exploration
+```{r exploration}
+plot(data_w_allTemp$bc_gr) #back-calculated growth per day
+plot(data_w_allTemp$relGR) #relative growth per day
+plot(log(data_w_allTemp$bc_gr))
+plot(log(data_w_allTemp$relGR))
+plot(data_w_allTemp$Increment) #This is Age
+plot(data_w_allTemp$TempApplied)
+plot(data_w_allTemp$hdate) 
+plot(data_w_allTemp$age_doy) #This is Day of Year
+plot(data_w_allTemp$Year)
+
+hist(data_w_allTemp$bc_gr)
+hist(log(data_w_allTemp$bc_gr))
+hist(data_w_allTemp$relGR)
+hist(log(data_w_allTemp$relGR))
+hist(data_w_allTemp$Increment)
+hist(data_w_allTemp$TempApplied)
+hist(data_w_allTemp$hdate)
+hist(data_w_allTemp$age_doy)
+hist(data_w_allTemp$Year)
+
+plot(log(bc_gr) ~ Increment, data = data_w_allTemp)
+plot(log(bc_gr) ~ TempApplied, data = data_w_allTemp)
+plot(log(bc_gr) ~ hdate, data = data_w_allTemp)
+plot(log(bc_gr) ~ age_doy, data = data_w_allTemp)
+plot(log(bc_gr) ~ Year, data = data_w_allTemp)
+plot(Increment ~ TempApplied, data = data_w_allTemp)
+plot(hdate ~ TempApplied, data = data_w_allTemp)
+
+plot(relGR ~ Increment, data = data_w_allTemp)
+plot(log(relGR) ~ Increment, data = data_w_allTemp)
+plot(log(relGR) ~ TempApplied, data = data_w_allTemp)
+plot(log(relGR) ~ hdate, data = data_w_allTemp)
+plot(log(relGR) ~ age_doy, data = data_w_allTemp)
+plot(log(relGR) ~ Year, data = data_w_allTemp)
+
+#Correlations among scaled data
+data.scaled <- data_w_allTemp %>%
+  select(Year, ID, bc_gr, relGR, Increment, TempApplied, hdate, age_doy) %>%
+  mutate(logbc_gr = log(bc_gr)) %>%
+  mutate(logrelGR = log(relGR)) %>%
+  mutate(scaledAge = scale(Increment)) %>%
+  mutate(scaledTemp = scale(TempApplied)) %>%
+  mutate(scaledhdate = scale(hdate))
+
+cor(data.scaled, method = "pearson")
+```
+
+
+### Scaling data to use for analyses
+```{r scaling}
+data.for.analysis <- data_w_allTemp %>%
+  select(Year, ID, bc_gr, relGR, Increment, TempApplied, hdate) %>%
+  filter(hdate > 40) %>%
+  mutate(IDf = as.factor(ID)) %>%
+  mutate(scaledAge = scale(Increment)) %>%
+  mutate(scaledTemp = scale(TempApplied)) %>%
+  mutate(scaledHD = scale(hdate)) %>%
+  mutate(logbc_gr = log(bc_gr)) %>%
+  mutate(logrelGR = log(relGR)) %>%
+  mutate(Yearf = as.factor(Year)) %>%
+  # mutate(HW = as.factor(if_else(Year < 2015, "before", "since")))
+  mutate(HW = as.factor(if_else(Year < 2015, "before", if_else(Year %in% c(2017, 2018), "between", "during"))))
+```
+
+
+## Analyses:
+
+
+
+
+## GAMM
+Examining the interactive effects of age on temperature (continuous) within the two heatwave periods while considering fish ID as a random intercept with a random slope of age.
+
+
+```{r GAMM1}
+
+
+GAMM1 <- gamm(logbc_gr ~ HW + te(scaledAge, scaledTemp, by = HW, bs = "cr"), 
+                     random = list(IDf = ~ 1 + scaledAge, Yearf = ~ 1),
+                     data = data.for.analysis, method = "REML")
+
+summary(GAMM1$gam)
+summary(GAMM1$lme)
+
+
+
+concurvity(GAMM1$gam, full = TRUE)
+concurvity(GAMM1$gam, full = FALSE)
+
+```
+
+
+
+
+
+
+
+
+```{r GAMM2}
+
+
+GAMM2 <- gamm(logrelGR ~ HW + te(scaledAge, scaledTemp, by = HW, bs = "cr"), 
+                     random = list(IDf = ~ 1 + scaledAge, Yearf = ~ 1),
+                     data = data.for.analysis, method = "REML")
+
+summary(GAMM2$gam)
+summary(GAMM2$lme)
+
+concurvity(GAMM2$gam, full = TRUE)
+concurvity(GAMM2$gam, full = FALSE)
+
+```
+
+
+
+
+
+
+
+
+
+
+### Model Validation
+```{r GAMM1valid}
+plot(GAMM1$lme) #I believe this uses standardized residuals bc uses type "pearson": https://rdrr.io/cran/lme4/man/residuals.merMod.html
+plot(data.for.analysis$HW, resid(GAMM1$lme, type = "pearson"))
+plot(data.for.analysis$scaledTemp, resid(GAMM1$lme, type = "pearson"))
+plot(data.for.analysis$scaledAge, resid(GAMM1$lme, type = "pearson"))
+qqnorm(resid(GAMM1$lme, type = "pearson"))
+qqline(resid(GAMM1$lme, type = "pearson"))
+hist(residuals(GAMM1$lme, type = "pearson"), xlab = "Standardized residuals", ylab = "Frequency", main = NULL)
+hist(residuals(GAMM1$lme, type = "pearson") ~ data.for.analysis$HW, xlab = "Standardized residuals", ylab = "Frequency", main = NULL)
+
+```
+
+
+```{r GAMM2valid}
+plot(GAMM2$lme) #I believe this uses standardized residuals bc uses type "pearson": https://rdrr.io/cran/lme4/man/residuals.merMod.html
+plot(data.for.analysis$HW, resid(GAMM2$lme, type = "pearson"))
+plot(data.for.analysis$scaledTemp, resid(GAMM2$lme, type = "pearson"))
+plot(data.for.analysis$scaledAge, resid(GAMM2$lme, type = "pearson"))
+qqnorm(resid(GAMM2$lme, type = "pearson"))
+qqline(resid(GAMM2$lme, type = "pearson"))
+hist(residuals(GAMM2$lme, type = "pearson"), xlab = "Standardized residuals", ylab = "Frequency", main = NULL)
+hist(residuals(GAMM2$lme, type = "pearson") ~ data.for.analysis$HW, xlab = "Standardized residuals", ylab = "Frequency", main = NULL)
+
+```
+
+
+
+### Plotting effects
+```{r GAMM1temppreddata}
+#Standardized ranges
+AgeRange <- scale(seq(1, 99, by = 1))
+TempRange <- scale(seq(2.75, 13.29, by = 1.14))
+
+MedTemp <- median(data.for.analysis$TempApplied) #These should be around 0 for scaled values
+MedAge <- median(data.for.analysis$Increment) #These should be around 0 for scaled values
+
+
+# Temperature x Age
+
+p1.agextemp.before.nolimits <- predict_gam(GAMM1$gam, values = list(scaledAge = AgeRange,
+                                                 scaledTemp = TempRange,
+                                                 HW = "before")) %>%
+  mutate(AgeDAYS = ((scaledAge * sd(seq(1, 99, by = 1))) + mean(seq(1, 99, by = 1)))) %>%
+  mutate(TempC = round(scaledTemp * sd((seq(2.75, 13.29, by = 1.14))) + mean(seq(2.75, 13.29, by = 1.14)), digits = 2)) %>%
+  mutate(Abs_Gr = exp(logbc_gr))
+
+
+data.for.analysis.before <- data.for.analysis %>%
+  filter(HW == "before")
+
+data.range.before <- data.for.analysis.before %>%
+  group_by(Increment) %>%
+  summarize(max.temp = max(TempApplied), min.temp = min(TempApplied)) %>%
+  rename(AgeDAYS = "Increment")
+
+p1.agextemp.before <- left_join(p1.agextemp.before.nolimits, data.range.before) %>%
+  mutate(Growth.limits = if_else(max.temp < TempC - 1.25, NA_real_, if_else(min.temp > TempC + 1.25, NA_real_, Abs_Gr)))
+
+
+
+
+
+
+p1.agextemp.during.nolimits <- predict_gam(GAMM1$gam, values = list(scaledAge = AgeRange,
+                                                 scaledTemp = TempRange,
+                                                 # scaledHD = 0,
+                                                 HW = "during")) %>%
+  mutate(AgeDAYS = ((scaledAge * sd(seq(1, 99, by = 1))) + mean(seq(1, 99, by = 1)))) %>%
+  mutate(TempC = round(scaledTemp * sd((seq(2.75, 13.29, by = 1.14))) + mean(seq(2.75, 13.29, by = 1.14)), digits = 2)) %>%
+  mutate(Abs_Gr = exp(logbc_gr))
+
+
+data.for.analysis.during <- data.for.analysis %>%
+  filter(HW == "during")
+
+data.range.during <- data.for.analysis.during %>%
+  group_by(Increment) %>%
+  summarize(max.temp = max(TempApplied), min.temp = min(TempApplied)) %>%
+  rename(AgeDAYS = "Increment")
+
+p1.agextemp.during <- left_join(p1.agextemp.during.nolimits, data.range.during) %>%
+  mutate(Growth.limits = if_else(max.temp < TempC - 1.25, NA_real_, if_else(min.temp > TempC, NA_real_, Abs_Gr))) # restricted growth to min temp because of weird extremely high growth at oldest ages at very low temps
+
+
+
+
+
+
+p1.agextemp.between.nolimits <- predict_gam(GAMM1$gam, values = list(scaledAge = AgeRange,
+                                                 scaledTemp = TempRange,
+                                                 # scaledHD = 0,
+                                                 HW = "between")) %>%
+  mutate(AgeDAYS = ((scaledAge * sd(seq(1, 99, by = 1))) + mean(seq(1, 99, by = 1)))) %>%
+  mutate(TempC = round(scaledTemp * sd((seq(2.75, 13.29, by = 1.14))) + mean(seq(2.75, 13.29, by = 1.14)), digits = 2)) %>%
+  mutate(Abs_Gr = exp(logbc_gr))
+
+
+data.for.analysis.between <- data.for.analysis %>%
+  filter(HW == "between")
+
+data.range.between <- data.for.analysis.between %>%
+  group_by(Increment) %>%
+  summarize(max.temp = max(TempApplied), min.temp = min(TempApplied)) %>%
+  rename(AgeDAYS = "Increment")
+
+p1.agextemp.between <- left_join(p1.agextemp.between.nolimits, data.range.between) %>%
+  mutate(Growth.limits = if_else(max.temp < TempC - 1.25, NA_real_, if_else(min.temp > TempC, NA_real_, Abs_Gr))) # restricted growth to min temp because of weird extremely high growth at oldest ages at very low temps
+
+
+
+
+
+
+```
+
+
+
+```{r GAMM2temppreddata}
+#Standardized ranges
+AgeRange <- scale(seq(1, 99, by = 1))
+TempRange <- scale(seq(2.75, 13.29, by = 1.14))
+
+MedTemp <- median(data.for.analysis$TempApplied) #These should be around 0 for scaled values
+MedAge <- median(data.for.analysis$Increment) #These should be around 0 for scaled values
+
+
+# Temperature x Age
+
+p2.agextemp.before.nolimits <- predict_gam(GAMM2$gam, values = list(scaledAge = AgeRange,
+                                                 scaledTemp = TempRange,
+                                                 HW = "before")) %>%
+  mutate(AgeDAYS = ((scaledAge * sd(seq(1, 99, by = 1))) + mean(seq(1, 99, by = 1)))) %>%
+  mutate(TempC = round(scaledTemp * sd((seq(2.75, 13.29, by = 1.14))) + mean(seq(2.75, 13.29, by = 1.14)), digits = 2)) %>%
+  mutate(Rel_Gr = exp(logrelGR))
+
+
+
+
+p2.agextemp.before <- left_join(p2.agextemp.before.nolimits, data.range.before) %>%
+  mutate(Growth.limits = if_else(max.temp < TempC - 1.25, NA_real_, if_else(min.temp > TempC + 1.25, NA_real_, Rel_Gr)))
+
+
+
+
+
+
+p2.agextemp.during.nolimits <- predict_gam(GAMM2$gam, values = list(scaledAge = AgeRange,
+                                                 scaledTemp = TempRange,
+                                                 HW = "during")) %>%
+  mutate(AgeDAYS = ((scaledAge * sd(seq(1, 99, by = 1))) + mean(seq(1, 99, by = 1)))) %>%
+  mutate(TempC = round(scaledTemp * sd((seq(2.75, 13.29, by = 1.14))) + mean(seq(2.75, 13.29, by = 1.14)), digits = 2))%>%
+  mutate(Rel_Gr = exp(logrelGR))
+
+
+p2.agextemp.during <- left_join(p2.agextemp.during.nolimits, data.range.during) %>%
+  mutate(Growth.limits = if_else(max.temp < TempC - 1.25, NA_real_, if_else(min.temp > TempC + 1.25, NA_real_, Rel_Gr)))
+
+
+
+
+
+
+p2.agextemp.between.nolimits <- predict_gam(GAMM2$gam, values = list(scaledAge = AgeRange,
+                                                 scaledTemp = TempRange,
+                                                 HW = "between")) %>%
+  mutate(AgeDAYS = ((scaledAge * sd(seq(1, 99, by = 1))) + mean(seq(1, 99, by = 1)))) %>%
+  mutate(TempC = round(scaledTemp * sd((seq(2.75, 13.29, by = 1.14))) + mean(seq(2.75, 13.29, by = 1.14)), digits = 2))%>%
+  mutate(Rel_Gr = exp(logrelGR))
+
+
+p2.agextemp.between <- left_join(p2.agextemp.between.nolimits, data.range.between) %>%
+  mutate(Growth.limits = if_else(max.temp < TempC - 1.25, NA_real_, if_else(min.temp > TempC + 1.25, NA_real_, Rel_Gr)))
+
+
+```
+
+
+
+
+
+```{r GAMM1tempplotting}
+
+grandmin <- min(p1.agextemp.during$Growth.limits, na.rm = TRUE)
+grandmax <- 0.74 #max(p1.agextemp.since$Growth.limits, na.rm = TRUE) #Restrcited max further since very few points were above this and the scale was too hard to read for lower values
+
+mybreaks <- seq(grandmin, grandmax, length.out = 13)
+
+
+#Function to create labels for legend
+breaklabel <- function(x){
+   labels <- paste0(round(mybreaks[1:12], 2), "\u2013", round(mybreaks[2:13], 2))
+   labels[1:x]
+}
+
+
+
+library(scales)
+
+mycolors <- colorRampPalette(c("hotpink4", "lavender"))
+
+
+
+
+
+
+analy.AgeTemp.interaction.plot.before <- ggplot() +
+  geom_contour_filled(data = p1.agextemp.before, aes(x = AgeDAYS, y = TempC, z = Growth.limits), breaks = mybreaks) +
+  geom_point(data = data.for.analysis.before, aes(x = Increment, y = TempApplied), alpha = 0, size = 1) +
+  scale_fill_manual(values = mycolors(12), labels = breaklabel(12), guide = guide_legend(reverse = TRUE)) +
+  labs(x = "Age (days)", y = "Temperature (\u00B0C)", fill = "Growth (mm\u22C5d\u207B\u00B9)") +
+  # scale_y_continuous(breaks = seq(2.5, 13.5, by = 2)) +
+  ylim(2.5, 13.5) +
+  theme_classic() +
+  theme(axis.text = element_text(size = 9), axis.title = element_text(size = 10),
+      legend.text = element_text(size = 9), legend.title = element_text(size = 10),
+      axis.text.x = element_blank(), axis.title.x = element_blank(),
+      plot.margin = margin(0.5,5,12,0.5))
+analy.AgeTemp.interaction.plot.before
+
+
+analy.AgeTemp.before.points <- ggplot() +
+  geom_point(data = data.for.analysis.before, aes(x = Increment, y = TempApplied), alpha = 0.1, size = 1) +
+  scale_fill_manual(values = mycolors(12), labels = breaklabel(12), guide = guide_legend(reverse = TRUE)) +
+  labs(x = "Age (days)", y = "Temperature (\u00B0C)", fill = "Growth (mm\u22C5d\u207B\u00B9)") +
+  # scale_y_continuous(breaks = seq(2.5, 13.5, by = 2)) +
+  ylim(2.5, 13.5) +
+  theme_classic() +
+  theme(axis.text = element_text(size = 9), axis.title = element_text(size = 10),
+      legend.text = element_text(size = 9), legend.title = element_text(size = 10),
+      axis.text.x = element_blank(), axis.title.x = element_blank(), axis.text.y = element_blank(), axis.title.y = element_blank(),
+      plot.margin = margin(0.5,5,12,0.5))
+analy.AgeTemp.before.points
+
+
+
+
+
+
+
+
+
+
+analy.AgeTemp.interaction.plot.during <- ggplot() +
+  geom_contour_filled(data = p1.agextemp.during, aes(x = AgeDAYS, y = TempC, z = Growth.limits), breaks = mybreaks) +
+  geom_point(data = data.for.analysis.during, aes(Increment, TempApplied), alpha = 0.0, size = 1) +
+  scale_fill_manual(values = mycolors(12), labels = breaklabel(12), guide = guide_legend(reverse = TRUE)) +
+  labs(x = "Age (days)", y = "Temperature (\u00B0C)", fill = "Growth (mm\u22C5d\u207B\u00B9)") +
+  # scale_y_continuous(breaks = seq(2.5, 13.5, by = 2)) +
+  ylim(2.5, 13.5) +
+  theme_classic() +
+  theme(axis.text = element_text(size = 9), axis.title = element_text(size = 10),
+      legend.position = "right", legend.text = element_text(size = 9), legend.title = element_text(size = 10),
+      axis.text.x = element_blank(), axis.title.x = element_blank(),
+      plot.margin = margin(0.5,5,12,0.5))
+analy.AgeTemp.interaction.plot.during
+
+
+analy.AgeTemp.during.points <- ggplot() +
+  geom_point(data = data.for.analysis.during, aes(Increment, TempApplied), alpha = 0.1, size = 1) +
+  labs(x = "Age (days)", y = "Temperature (\u00B0C)", fill = "Growth (mm\u22C5d\u207B\u00B9)") +
+  # scale_y_continuous(breaks = seq(2.5, 13.5, by = 2)) +
+  ylim(2.5, 13.5) +
+  theme_classic() +
+  theme(axis.text = element_text(size = 9), axis.title = element_text(size = 10),
+      legend.position = "right", legend.text = element_text(size = 9), legend.title = element_text(size = 10),
+      axis.text.x = element_blank(), axis.title.x = element_blank(),
+      axis.text.y = element_blank(), axis.title.y = element_blank(),
+      plot.margin = margin(0.5,5,12,0.5))
+analy.AgeTemp.during.points
+
+
+
+
+
+
+
+
+
+
+analy.AgeTemp.interaction.plot.between <- ggplot() +
+  geom_contour_filled(data = p1.agextemp.between, aes(x = AgeDAYS, y = TempC, z = Growth.limits), breaks = mybreaks) +
+  geom_point(data = data.for.analysis.between, aes(Increment, TempApplied), alpha = 0.0, size = 1) +
+  scale_fill_manual(values = mycolors(12), labels = breaklabel(12), guide = guide_legend(reverse = TRUE)) +
+  labs(x = "Age (days)", y = "Temperature (\u00B0C)", fill = "Growth (mm\u22C5d\u207B\u00B9)") +
+  # scale_y_continuous(breaks = seq(2.5, 13.5, by = 2)) +
+  ylim(2.5, 13.5) +
+  theme_classic() +
+  theme(axis.text = element_text(size = 9), axis.title = element_text(size = 10),
+      legend.position = "right", legend.text = element_text(size = 9), legend.title = element_text(size = 10),
+      plot.margin = margin(0.5,5,0.5,0.5))
+analy.AgeTemp.interaction.plot.between
+
+
+analy.AgeTemp.between.points <- ggplot() +
+  geom_point(data = data.for.analysis.between, aes(Increment, TempApplied), alpha = 0.1, size = 1) +
+  labs(x = "Age (days)", y = "Temperature (\u00B0C)", fill = "Growth (mm\u22C5d\u207B\u00B9)") +
+  # scale_y_continuous(breaks = seq(2.5, 13.5, by = 2)) +
+  ylim(2.5, 13.5) +
+  theme_classic() +
+  theme(axis.text = element_text(size = 9), axis.title = element_text(size = 10),
+      legend.position = "right", legend.text = element_text(size = 9), legend.title = element_text(size = 10),
+      axis.text.y = element_blank(), axis.title.y = element_blank(),
+      plot.margin = margin(0.5,5,0.5,0.5))
+analy.AgeTemp.between.points
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+library(ggpubr)     # needed to plot panels together
+library(cowplot)    # needed to plot panels together
+
+
+
+
+
+
+AgexTemp_BA <- plot_grid(analy.AgeTemp.interaction.plot.before + theme(legend.position = "none"), analy.AgeTemp.before.points, analy.AgeTemp.interaction.plot.during + theme(legend.position = "none"), analy.AgeTemp.during.points, analy.AgeTemp.interaction.plot.between + theme(legend.position = "none"), analy.AgeTemp.between.points, ncol = 2, nrow = 3,
+                       labels = c("(A) Before", "", "(B) During", "", "(C) Between", ""), label_size = 12, label_x = 0.1, label_y = 0.95,
+                       rel_widths = c(1, 0.8), rel_heights = c(0.90, 0.90, 1))
+
+AgexTemp_BA
+
+
+legend_color <- get_legend(analy.AgeTemp.interaction.plot.between + theme(legend.box.margin = margin(0, 0, 0, 12)))
+
+
+AgexTemp_BA_w_legend <- plot_grid(AgexTemp_BA, legend_color, rel_widths = c(2.5, 0.7))
+AgexTemp_BA_w_legend
+
+
+# ggsave("11_GAMM_TempxAge_3HW_absGR.tif", plot = last_plot(), device = "tiff",
+#        width = 6.5, height = 7.0, units = "in", dpi = 300)
+
+
+
+
+
+
+```
+
+
+
+```{r GAMM2tempplotting}
+
+grandmin <- min(p2.agextemp.during$Growth.limits, na.rm = TRUE)
+grandmax <- max(p2.agextemp.before$Growth.limits, na.rm = TRUE)
+
+mybreaks <- seq(grandmin, grandmax, length.out = 13)
+
+
+#Function to create labels for legend
+breaklabel <- function(x){
+   labels <- paste0(round(mybreaks[1:12], 3), "\u2013", round(mybreaks[2:13], 3))
+   labels[1:x]
+}
+
+
+
+library(scales)
+
+mycolors <- colorRampPalette(c("hotpink4", "lavender"))
+
+
+
+
+
+
+
+analy.AgeTemp.interaction.plot.before <- ggplot() +
+  geom_contour_filled(data = p2.agextemp.before, aes(x = AgeDAYS, y = TempC, z = Growth.limits), breaks = mybreaks) +
+  geom_point(data = data.for.analysis.before, aes(x = Increment, y = TempApplied), alpha = 0, size = 1) +
+  scale_fill_manual(values = mycolors(12), labels = breaklabel(12), guide = guide_legend(reverse = TRUE)) +
+  labs(x = "Age (days)", y = "Temperature (\u00B0C)", fill = "Rel. growth\n(mm\u22C5mm\u207B\u00B9\u22C5d\u207B\u00B9)") +
+  # scale_y_continuous(breaks = seq(2.5, 13.5, by = 2)) +
+  ylim(2.5, 13.5) +
+  theme_classic() +
+  theme(axis.text = element_text(size = 9), axis.title = element_text(size = 10),
+      legend.text = element_text(size = 9), legend.title = element_text(size = 10),
+      axis.text.x = element_blank(), axis.title.x = element_blank(),
+      plot.margin = margin(0.5,5,12,0.5))
+analy.AgeTemp.interaction.plot.before
+
+
+analy.AgeTemp.before.points <- ggplot() +
+  geom_point(data = data.for.analysis.before, aes(x = Increment, y = TempApplied), alpha = 0.1, size = 1) +
+  scale_fill_manual(values = mycolors(12), labels = breaklabel(12), guide = guide_legend(reverse = TRUE)) +
+  labs(x = "Age (days)", y = "Temperature (\u00B0C)", fill = "Rel. growth\n(mm\u22C5mm\u207B\u00B9\u22C5d\u207B\u00B9)") +
+  # scale_y_continuous(breaks = seq(2.5, 13.5, by = 2)) +
+  ylim(2.5, 13.5) +
+  theme_classic() +
+  theme(axis.text = element_text(size = 9), axis.title = element_text(size = 10),
+      legend.text = element_text(size = 9), legend.title = element_text(size = 10),
+      axis.text.x = element_blank(), axis.title.x = element_blank(), axis.text.y = element_blank(), axis.title.y = element_blank(),
+      plot.margin = margin(0.5,5,12,0.5))
+analy.AgeTemp.before.points
+
+
+
+
+
+
+
+
+
+
+analy.AgeTemp.interaction.plot.during <- ggplot() +
+  geom_contour_filled(data = p2.agextemp.during, aes(x = AgeDAYS, y = TempC, z = Growth.limits), breaks = mybreaks) +
+  geom_point(data = data.for.analysis.during, aes(Increment, TempApplied), alpha = 0.0, size = 1) +
+  scale_fill_manual(values = mycolors(12), labels = breaklabel(12), guide = guide_legend(reverse = TRUE)) +
+  labs(x = "Age (days)", y = "Temperature (\u00B0C)", fill = "Rel. growth\n(mm\u22C5mm\u207B\u00B9\u22C5d\u207B\u00B9)") +
+  # scale_y_continuous(breaks = seq(2.5, 13.5, by = 2)) +
+  ylim(2.5, 13.5) +
+  theme_classic() +
+  theme(axis.text = element_text(size = 9), axis.title = element_text(size = 10),
+      legend.position = "right", legend.text = element_text(size = 9), legend.title = element_text(size = 10),
+      axis.text.x = element_blank(), axis.title.x = element_blank(),
+      plot.margin = margin(0.5,5,12,0.5))
+analy.AgeTemp.interaction.plot.during
+
+
+analy.AgeTemp.during.points <- ggplot() +
+  geom_point(data = data.for.analysis.during, aes(Increment, TempApplied), alpha = 0.1, size = 1) +
+  labs(x = "Age (days)", y = "Temperature (\u00B0C)", fill = "Rel. growth\n(mm\u22C5mm\u207B\u00B9\u22C5d\u207B\u00B9)") +
+  # scale_y_continuous(breaks = seq(2.5, 13.5, by = 2)) +
+  ylim(2.5, 13.5) +
+  theme_classic() +
+  theme(axis.text = element_text(size = 9), axis.title = element_text(size = 10),
+      legend.position = "right", legend.text = element_text(size = 9), legend.title = element_text(size = 10),
+      axis.text.x = element_blank(), axis.title.x = element_blank(),
+      axis.text.y = element_blank(), axis.title.y = element_blank(),
+      plot.margin = margin(0.5,5,12,0.5))
+analy.AgeTemp.during.points
+
+
+
+
+
+
+
+
+
+
+analy.AgeTemp.interaction.plot.between <- ggplot() +
+  geom_contour_filled(data = p2.agextemp.between, aes(x = AgeDAYS, y = TempC, z = Growth.limits), breaks = mybreaks) +
+  geom_point(data = data.for.analysis.between, aes(Increment, TempApplied), alpha = 0.0, size = 1) +
+  scale_fill_manual(values = mycolors(12), labels = breaklabel(12), guide = guide_legend(reverse = TRUE)) +
+  labs(x = "Age (days)", y = "Temperature (\u00B0C)", fill = "Rel. growth\n(mm\u22C5mm\u207B\u00B9\u22C5d\u207B\u00B9)") +
+  # scale_y_continuous(breaks = seq(2.5, 13.5, by = 2)) +
+  ylim(2.5, 13.5) +
+  theme_classic() +
+  theme(axis.text = element_text(size = 9), axis.title = element_text(size = 10),
+      legend.position = "right", legend.text = element_text(size = 9), legend.title = element_text(size = 10),
+      plot.margin = margin(0.5,5,0.5,0.5))
+analy.AgeTemp.interaction.plot.between
+
+
+analy.AgeTemp.between.points <- ggplot() +
+  geom_point(data = data.for.analysis.between, aes(Increment, TempApplied), alpha = 0.1, size = 1) +
+  labs(x = "Age (days)", y = "Temperature (\u00B0C)", fill = "Rel. growth\n(mm\u22C5mm\u207B\u00B9\u22C5d\u207B\u00B9)") +
+  # scale_y_continuous(breaks = seq(2.5, 13.5, by = 2)) +
+  ylim(2.5, 13.5) +
+  theme_classic() +
+  theme(axis.text = element_text(size = 9), axis.title = element_text(size = 10),
+      legend.position = "right", legend.text = element_text(size = 9), legend.title = element_text(size = 10),
+      axis.text.y = element_blank(), axis.title.y = element_blank(),
+      plot.margin = margin(0.5,5,0.5,0.5))
+analy.AgeTemp.between.points
+
+
+
+
+
+
+
+
+
+
+library(ggpubr)     # needed to plot panels together
+library(cowplot)    # needed to plot panels together
+
+
+
+
+AgexTemp_BA <- plot_grid(analy.AgeTemp.interaction.plot.before + theme(legend.position = "none"), analy.AgeTemp.before.points, analy.AgeTemp.interaction.plot.during + theme(legend.position = "none"), analy.AgeTemp.during.points, analy.AgeTemp.interaction.plot.between + theme(legend.position = "none"), analy.AgeTemp.between.points, ncol = 2, nrow = 3,
+                       labels = c("(A) Before", "", "(B) During", "", "(C) Between", ""), label_size = 12, label_x = 0.1, label_y = 0.95,
+                       rel_widths = c(1, 0.8), rel_heights = c(0.90, 0.90, 1))
+
+AgexTemp_BA
+
+
+legend_color <- get_legend(analy.AgeTemp.interaction.plot.between + theme(legend.box.margin = margin(0, 0, 0, 12)))
+
+
+AgexTemp_BA_w_legend <- plot_grid(AgexTemp_BA, legend_color, rel_widths = c(2.5, 0.7))
+AgexTemp_BA_w_legend
+
+# ggsave("11_GAMM_TempxAge_3HW_relGR.tif", plot = last_plot(), device = "tiff",
+#        width = 6.5, height = 7.0, units = "in", dpi = 300)
+
+
+
+
+
+```
+
+
+
+
+```{r GAMM1tempsigsmooths}
+
+
+
+# scaled age of -1.39262125 = 10 days
+# scaled age of -0.34815531 = 40 days
+# scaled age of 0.87038828 = 75 days
+
+agextempsmooth.before10.nolimits <- predict_gam(GAMM1$gam, values = list(scaledAge = -1.39262125,
+                                                 scaledTemp = TempRange,
+                                                 HW = "before")) %>%
+  mutate(AgeDAYS = ((scaledAge * sd(seq(1, 99, by = 1))) + mean(seq(1, 99, by = 1)))) %>%
+  mutate(TempC = round(scaledTemp * sd((seq(2.75, 13.29, by = 1.14))) + mean(seq(2.75, 13.29, by = 1.14)), digits = 2)) %>%
+  mutate(Abs_Gr = exp(logbc_gr), Abs_lci = exp(lower_ci), Abs_uci = exp(upper_ci))
+
+
+data.range.before <- data.for.analysis.before %>%
+  filter(Increment == 10) %>% #group_by(Increment) %>%
+  summarize(max.temp = max(TempApplied), min.temp = min(TempApplied))
+
+
+agextempsmooth.before10 <- agextempsmooth.before10.nolimits %>%
+  mutate(max.temp = data.range.before$max.temp) %>%
+  mutate(min.temp = data.range.before$min.temp) %>%
+  mutate(Growth.limits = if_else(max.temp < TempC - 1.0, NA_real_, if_else(min.temp > TempC + 1.0, NA_real_, Abs_Gr))) %>%
+  drop_na()
+
+
+
+agextempsmooth.during10.nolimits <- predict_gam(GAMM1$gam, values = list(scaledAge = -1.39262125,
+                                                 scaledTemp = TempRange,
+                                                 HW = "during")) %>%
+  mutate(AgeDAYS = ((scaledAge * sd(seq(1, 99, by = 1))) + mean(seq(1, 99, by = 1)))) %>%
+  mutate(TempC = round(scaledTemp * sd((seq(2.75, 13.29, by = 1.14))) + mean(seq(2.75, 13.29, by = 1.14)), digits = 2)) %>%
+  mutate(Abs_Gr = exp(logbc_gr), Abs_lci = exp(lower_ci), Abs_uci = exp(upper_ci))
+
+
+data.range.during <- data.for.analysis.during %>%
+  filter(Increment == 10) %>% #group_by(Increment) %>%
+  summarize(max.temp = max(TempApplied), min.temp = min(TempApplied))
+
+
+agextempsmooth.during10 <- agextempsmooth.during10.nolimits %>%
+  mutate(max.temp = data.range.during$max.temp) %>%
+  mutate(min.temp = data.range.during$min.temp) %>%
+  mutate(Growth.limits = if_else(max.temp < TempC - 1.0, NA_real_, if_else(min.temp > TempC + 1.0, NA_real_, Abs_Gr))) %>%
+  drop_na()
+
+
+
+agextempsmooth.between10.nolimits <- predict_gam(GAMM1$gam, values = list(scaledAge = -1.39262125,
+                                                 scaledTemp = TempRange,
+                                                 HW = "between")) %>%
+  mutate(AgeDAYS = ((scaledAge * sd(seq(1, 99, by = 1))) + mean(seq(1, 99, by = 1)))) %>%
+  mutate(TempC = round(scaledTemp * sd((seq(2.75, 13.29, by = 1.14))) + mean(seq(2.75, 13.29, by = 1.14)), digits = 2)) %>%
+  mutate(Abs_Gr = exp(logbc_gr), Abs_lci = exp(lower_ci), Abs_uci = exp(upper_ci))
+
+
+data.range.between <- data.for.analysis.between %>%
+  filter(Increment == 10) %>% #group_by(Increment) %>%
+  summarize(max.temp = max(TempApplied), min.temp = min(TempApplied))
+
+
+agextempsmooth.between10 <- agextempsmooth.between10.nolimits %>%
+  mutate(max.temp = data.range.between$max.temp) %>%
+  mutate(min.temp = data.range.between$min.temp) %>%
+  mutate(Growth.limits = if_else(max.temp < TempC - 1.0, NA_real_, if_else(min.temp > TempC + 1.0, NA_real_, Abs_Gr))) %>%
+  drop_na()
+
+
+agextempsmooth.10 <- bind_rows(agextempsmooth.before10, agextempsmooth.during10, agextempsmooth.between10)
+
+
+# x11()
+agextempsmooth.10.plot <- ggplot() +
+  geom_line(data = agextempsmooth.10, aes(x = TempC, y = Growth.limits, color = as.factor(HW)), linewidth = 1) +
+  geom_ribbon(data = agextempsmooth.10, aes(x = TempC, ymin = Abs_lci, ymax = Abs_uci, fill = as.factor(HW)), alpha = 0.25) +
+  scale_color_manual(values = c("black", "lightsteelblue3", "steelblue"), labels = c("Before", "During", "Between"), name = "Years binned by\nheatwave status") +
+  scale_fill_manual(values = c("black", "lightsteelblue3", "steelblue"), labels = c("Before", "During", "Between"), name = "Years binned by\nheatwave status") +
+  labs(x = "", y = "Absolute growth\n(mm\u22C5d\u207B\u00B9)") +
+  scale_y_continuous(labels = scales::number_format(accuracy = 0.01)) +
+  scale_y_continuous(labels = scales::number_format(accuracy = 0.01), limits = c(0, 0.7)) +
+  xlim(2.5, 14) +
+  theme_classic() +
+  theme(axis.text = element_text(size = 9), axis.title = element_text(size = 10),
+        legend.text = element_text(size = 9), legend.title = element_blank(),
+        axis.text.x = element_blank())
+agextempsmooth.10.plot
+
+
+
+
+
+
+### 
+# 40 days
+agextempsmooth.before40.nolimits <- predict_gam(GAMM1$gam, values = list(scaledAge = -0.34815531,
+                                                 scaledTemp = TempRange,
+                                                 HW = "before")) %>%
+  mutate(AgeDAYS = ((scaledAge * sd(seq(1, 99, by = 1))) + mean(seq(1, 99, by = 1)))) %>%
+  mutate(TempC = round(scaledTemp * sd((seq(2.75, 13.29, by = 1.14))) + mean(seq(2.75, 13.29, by = 1.14)), digits = 2)) %>%
+  mutate(Abs_Gr = exp(logbc_gr), Abs_lci = exp(lower_ci), Abs_uci = exp(upper_ci))
+
+
+data.range.before <- data.for.analysis.before %>%
+  filter(Increment == 40) %>% #group_by(Increment) %>%
+  summarize(max.temp = max(TempApplied), min.temp = min(TempApplied))
+
+
+agextempsmooth.before40 <- agextempsmooth.before40.nolimits %>%
+  mutate(max.temp = data.range.before$max.temp) %>%
+  mutate(min.temp = data.range.before$min.temp) %>%
+  mutate(Growth.limits = if_else(max.temp < TempC - 1.0, NA_real_, if_else(min.temp > TempC + 1.0, NA_real_, Abs_Gr))) %>%
+  drop_na()
+
+
+
+agextempsmooth.during40.nolimits <- predict_gam(GAMM1$gam, values = list(scaledAge = -0.34815531,
+                                                 scaledTemp = TempRange,
+                                                 # scaledHD = 0,
+                                                 HW = "during")) %>%
+  mutate(AgeDAYS = ((scaledAge * sd(seq(1, 99, by = 1))) + mean(seq(1, 99, by = 1)))) %>%
+  mutate(TempC = round(scaledTemp * sd((seq(2.75, 13.29, by = 1.14))) + mean(seq(2.75, 13.29, by = 1.14)), digits = 2)) %>%
+  mutate(Abs_Gr = exp(logbc_gr), Abs_lci = exp(lower_ci), Abs_uci = exp(upper_ci))
+
+
+data.range.during <- data.for.analysis.during %>%
+  filter(Increment == 40) %>% #group_by(Increment) %>%
+  summarize(max.temp = max(TempApplied), min.temp = min(TempApplied))
+
+
+agextempsmooth.during40 <- agextempsmooth.during40.nolimits %>%
+  mutate(max.temp = data.range.during$max.temp) %>%
+  mutate(min.temp = data.range.during$min.temp) %>%
+  mutate(Growth.limits = if_else(max.temp < TempC - 1.0, NA_real_, if_else(min.temp > TempC + 1.0, NA_real_, Abs_Gr))) %>%
+  drop_na()
+
+
+
+agextempsmooth.between40.nolimits <- predict_gam(GAMM1$gam, values = list(scaledAge = -0.34815531,
+                                                 scaledTemp = TempRange,
+                                                 # scaledHD = 0,
+                                                 HW = "between")) %>%
+  mutate(AgeDAYS = ((scaledAge * sd(seq(1, 99, by = 1))) + mean(seq(1, 99, by = 1)))) %>%
+  mutate(TempC = round(scaledTemp * sd((seq(2.75, 13.29, by = 1.14))) + mean(seq(2.75, 13.29, by = 1.14)), digits = 2)) %>%
+  mutate(Abs_Gr = exp(logbc_gr), Abs_lci = exp(lower_ci), Abs_uci = exp(upper_ci))
+
+
+data.range.between <- data.for.analysis.between %>%
+  filter(Increment == 40) %>% #group_by(Increment) %>%
+  summarize(max.temp = max(TempApplied), min.temp = min(TempApplied))
+
+
+agextempsmooth.between40 <- agextempsmooth.between40.nolimits %>%
+  mutate(max.temp = data.range.between$max.temp) %>%
+  mutate(min.temp = data.range.between$min.temp) %>%
+  mutate(Growth.limits = if_else(max.temp < TempC - 1.0, NA_real_, if_else(min.temp > TempC + 1.0, NA_real_, Abs_Gr))) %>%
+  drop_na()
+
+
+agextempsmooth.40 <- bind_rows(agextempsmooth.before40, agextempsmooth.during40, agextempsmooth.between40)
+
+
+# x11()
+agextempsmooth.40.plot <- ggplot() +
+  geom_line(data = agextempsmooth.40, aes(x = TempC, y = Growth.limits, color = as.factor(HW)), size = 1) +
+  geom_ribbon(data = agextempsmooth.40, aes(x = TempC, ymin = Abs_lci, ymax = Abs_uci, fill = as.factor(HW)), alpha = 0.25) +
+  scale_color_manual(values = c("black", "lightsteelblue3", "steelblue"), labels = c("Before", "During", "Between"), name = "Years binned by\nheatwave status") +
+  scale_fill_manual(values = c("black", "lightsteelblue3", "steelblue"), labels = c("Before", "During", "Between"), name = "Years binned by\nheatwave status") +
+  labs(x = "", y = "Absolute growth\n(mm\u22C5d\u207B\u00B9)") +
+  scale_y_continuous(labels = scales::number_format(accuracy = 0.01)) +
+  scale_y_continuous(labels = scales::number_format(accuracy = 0.01), limits = c(0, 0.7)) +
+  xlim(2.5, 14) +
+  theme_classic() +
+  theme(axis.text = element_text(size = 9), axis.title = element_text(size = 10),
+        legend.text = element_text(size = 9), legend.title = element_blank(),
+        axis.text.x = element_blank())
+agextempsmooth.40.plot
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### 
+# 75 days
+agextempsmooth.before75.nolimits <- predict_gam(GAMM1$gam, values = list(scaledAge = 0.87038828,
+                                                 scaledTemp = TempRange,
+                                                 HW = "before")) %>%
+  mutate(AgeDAYS = ((scaledAge * sd(seq(1, 99, by = 1))) + mean(seq(1, 99, by = 1)))) %>%
+  mutate(TempC = round(scaledTemp * sd((seq(2.75, 13.29, by = 1.14))) + mean(seq(2.75, 13.29, by = 1.14)), digits = 2)) %>%
+  mutate(Abs_Gr = exp(logbc_gr), Abs_lci = exp(lower_ci), Abs_uci = exp(upper_ci))
+
+
+data.range.before <- data.for.analysis.before %>%
+  filter(Increment == 75) %>% #group_by(Increment) %>%
+  summarize(max.temp = max(TempApplied), min.temp = min(TempApplied))
+
+
+agextempsmooth.before75 <- agextempsmooth.before75.nolimits %>%
+  mutate(max.temp = data.range.before$max.temp) %>%
+  mutate(min.temp = data.range.before$min.temp) %>%
+  mutate(Growth.limits = if_else(max.temp < TempC - 1.0, NA_real_, if_else(min.temp > TempC + 1.0, NA_real_, Abs_Gr))) %>%
+  drop_na()
+
+
+
+agextempsmooth.during75.nolimits <- predict_gam(GAMM1$gam, values = list(scaledAge = 0.87038828,
+                                                 scaledTemp = TempRange,
+                                                 HW = "during")) %>%
+  mutate(AgeDAYS = ((scaledAge * sd(seq(1, 99, by = 1))) + mean(seq(1, 99, by = 1)))) %>%
+  mutate(TempC = round(scaledTemp * sd((seq(2.75, 13.29, by = 1.14))) + mean(seq(2.75, 13.29, by = 1.14)), digits = 2)) %>%
+  mutate(Abs_Gr = exp(logbc_gr), Abs_lci = exp(lower_ci), Abs_uci = exp(upper_ci))
+
+
+data.range.during <- data.for.analysis.during %>%
+  filter(Increment == 75) %>% #group_by(Increment) %>%
+  summarize(max.temp = max(TempApplied), min.temp = min(TempApplied))
+
+
+agextempsmooth.during75 <- agextempsmooth.during75.nolimits %>%
+  mutate(max.temp = data.range.during$max.temp) %>%
+  mutate(min.temp = data.range.during$min.temp) %>%
+  mutate(Growth.limits = if_else(max.temp < TempC - 1.0, NA_real_, if_else(min.temp > TempC + 1.0, NA_real_, Abs_Gr))) %>%
+  drop_na()
+
+
+
+agextempsmooth.between75.nolimits <- predict_gam(GAMM1$gam, values = list(scaledAge = 0.87038828,
+                                                 scaledTemp = TempRange,
+                                                 HW = "between")) %>%
+  mutate(AgeDAYS = ((scaledAge * sd(seq(1, 99, by = 1))) + mean(seq(1, 99, by = 1)))) %>%
+  mutate(TempC = round(scaledTemp * sd((seq(2.75, 13.29, by = 1.14))) + mean(seq(2.75, 13.29, by = 1.14)), digits = 2)) %>%
+  mutate(Abs_Gr = exp(logbc_gr), Abs_lci = exp(lower_ci), Abs_uci = exp(upper_ci))
+
+
+data.range.between <- data.for.analysis.between %>%
+  filter(Increment == 75) %>% #group_by(Increment) %>%
+  summarize(max.temp = max(TempApplied), min.temp = min(TempApplied))
+
+
+agextempsmooth.between75 <- agextempsmooth.between75.nolimits %>%
+  mutate(max.temp = data.range.between$max.temp) %>%
+  mutate(min.temp = data.range.between$min.temp) %>%
+  mutate(Growth.limits = if_else(max.temp < TempC - 1.0, NA_real_, if_else(min.temp > TempC + 1.0, NA_real_, Abs_Gr))) %>%
+  drop_na()
+
+
+agextempsmooth.75 <- bind_rows(agextempsmooth.before75, agextempsmooth.during75, agextempsmooth.between75)
+
+
+# x11()
+agextempsmooth.75.plot <- ggplot() +
+  geom_line(data = agextempsmooth.75, aes(x = TempC, y = Growth.limits, color = as.factor(HW)), size = 1) +
+  geom_ribbon(data = agextempsmooth.75, aes(x = TempC, ymin = Abs_lci, ymax = Abs_uci, fill = as.factor(HW)), alpha = 0.25) +
+  scale_color_manual(values = c("black", "lightsteelblue3", "steelblue"), labels = c("Before", "During", "Between"), name = "Years binned by\nheatwave status") +
+  scale_fill_manual(values = c("black", "lightsteelblue3", "steelblue"), labels = c("Before", "During", "Between"), name = "Years binned by\nheatwave status") +
+  labs(x = "Temperature (\u00B0C)", y = "Absolute growth\n(mm\u22C5d\u207B\u00B9)") +
+  scale_y_continuous(labels = scales::number_format(accuracy = 0.01), limits = c(0, 0.7)) +
+  xlim(2.5, 14) +
+  theme_classic() +
+  theme(axis.text = element_text(size = 9), axis.title = element_text(size = 10),
+        legend.text = element_text(size = 9), legend.title = element_blank())
+agextempsmooth.75.plot
+
+
+
+
+
+```
+
+
+
+
+
+```{r GAMM2tempsigsmooths}
+
+#Figuring out which part of the smooths are significantly different
+
+# scaled age of -1.39262125 = 10 days
+# scaled age of -0.34815531 = 40 days
+# scaled age of 0.87038828 = 75 days
+
+agextempsmooth.before10.nolimits <- predict_gam(GAMM2$gam, values = list(scaledAge = -1.39262125,
+                                                 scaledTemp = TempRange,
+                                                 HW = "before")) %>%
+  mutate(AgeDAYS = ((scaledAge * sd(seq(1, 99, by = 1))) + mean(seq(1, 99, by = 1)))) %>%
+  mutate(TempC = round(scaledTemp * sd((seq(2.75, 13.29, by = 1.14))) + mean(seq(2.75, 13.29, by = 1.14)), digits = 2)) %>%
+  mutate(Rel_Gr = exp(logrelGR), Rel_lci = exp(lower_ci), Rel_uci = exp(upper_ci))
+
+
+data.range.before <- data.for.analysis.before %>%
+  filter(Increment == 10) %>% #group_by(Increment) %>%
+  summarize(max.temp = max(TempApplied), min.temp = min(TempApplied))
+
+
+agextempsmooth.before10 <- agextempsmooth.before10.nolimits %>%
+  mutate(max.temp = data.range.before$max.temp) %>%
+  mutate(min.temp = data.range.before$min.temp) %>%
+  mutate(Growth.limits = if_else(max.temp < TempC - 1.0, NA_real_, if_else(min.temp > TempC + 1.0, NA_real_, Rel_Gr))) %>%
+  drop_na()
+
+
+
+agextempsmooth.during10.nolimits <- predict_gam(GAMM2$gam, values = list(scaledAge = -1.39262125,
+                                                 scaledTemp = TempRange,
+                                                 HW = "during")) %>%
+  mutate(AgeDAYS = ((scaledAge * sd(seq(1, 99, by = 1))) + mean(seq(1, 99, by = 1)))) %>%
+  mutate(TempC = round(scaledTemp * sd((seq(2.75, 13.29, by = 1.14))) + mean(seq(2.75, 13.29, by = 1.14)), digits = 2)) %>%
+  mutate(Rel_Gr = exp(logrelGR), Rel_lci = exp(lower_ci), Rel_uci = exp(upper_ci))
+
+
+data.range.during <- data.for.analysis.during %>%
+  filter(Increment == 10) %>% #group_by(Increment) %>%
+  summarize(max.temp = max(TempApplied), min.temp = min(TempApplied))
+
+
+agextempsmooth.during10 <- agextempsmooth.during10.nolimits %>%
+  mutate(max.temp = data.range.during$max.temp) %>%
+  mutate(min.temp = data.range.during$min.temp) %>%
+  mutate(Growth.limits = if_else(max.temp < TempC - 1.0, NA_real_, if_else(min.temp > TempC + 1.0, NA_real_, Rel_Gr))) %>%
+  drop_na()
+
+
+
+agextempsmooth.between10.nolimits <- predict_gam(GAMM2$gam, values = list(scaledAge = -1.39262125,
+                                                 scaledTemp = TempRange,
+                                                 HW = "between")) %>%
+  mutate(AgeDAYS = ((scaledAge * sd(seq(1, 99, by = 1))) + mean(seq(1, 99, by = 1)))) %>%
+  mutate(TempC = round(scaledTemp * sd((seq(2.75, 13.29, by = 1.14))) + mean(seq(2.75, 13.29, by = 1.14)), digits = 2)) %>%
+  mutate(Rel_Gr = exp(logrelGR), Rel_lci = exp(lower_ci), Rel_uci = exp(upper_ci))
+
+
+data.range.between <- data.for.analysis.between %>%
+  filter(Increment == 10) %>% #group_by(Increment) %>%
+  summarize(max.temp = max(TempApplied), min.temp = min(TempApplied))
+
+
+agextempsmooth.between10 <- agextempsmooth.between10.nolimits %>%
+  mutate(max.temp = data.range.between$max.temp) %>%
+  mutate(min.temp = data.range.between$min.temp) %>%
+  mutate(Growth.limits = if_else(max.temp < TempC - 1.0, NA_real_, if_else(min.temp > TempC + 1.0, NA_real_, Rel_Gr))) %>%
+  drop_na()
+
+
+agextempsmooth.10 <- bind_rows(agextempsmooth.before10, agextempsmooth.during10, agextempsmooth.between10)
+
+
+# x11()
+agextempsmooth.10.plot.relGR <- ggplot() +
+  geom_line(data = agextempsmooth.10, aes(x = TempC, y = Growth.limits, color = as.factor(HW)), size = 1) +
+  geom_ribbon(data = agextempsmooth.10, aes(x = TempC, ymin = Rel_lci, ymax = Rel_uci, fill = as.factor(HW)), alpha = 0.25) +
+  scale_color_manual(values = c("black", "lightsteelblue3", "steelblue"), labels = c("Before", "During", "Between"), name = "Years binned by\nheatwave status") +
+  scale_fill_manual(values = c("black", "lightsteelblue3", "steelblue"), labels = c("Before", "During", "Between"), name = "Years binned by\nheatwave status") +
+  labs(x = "", y = "Relative Growth\n(mm\u22C5mm\u207B\u00B9\u22C5d\u207B\u00B9)") +
+  ylim(0.008, 0.043) +
+  xlim(2.5, 14) +
+  theme_classic() +
+  theme(axis.text = element_text(size = 9), axis.title = element_text(size = 10),
+        legend.text = element_text(size = 9), legend.title = element_blank(),
+        axis.text.x = element_blank())
+agextempsmooth.10.plot.relGR
+
+
+
+
+
+
+
+### 
+# 40 days
+agextempsmooth.before40.nolimits <- predict_gam(GAMM2$gam, values = list(scaledAge = -0.34815531,
+                                                 scaledTemp = TempRange,
+                                                 # scaledHD = 0,
+                                                 HW = "before")) %>%
+  mutate(AgeDAYS = ((scaledAge * sd(seq(1, 99, by = 1))) + mean(seq(1, 99, by = 1)))) %>%
+  mutate(TempC = round(scaledTemp * sd((seq(2.75, 13.29, by = 1.14))) + mean(seq(2.75, 13.29, by = 1.14)), digits = 2)) %>%
+  mutate(Rel_Gr = exp(logrelGR), Rel_lci = exp(lower_ci), Rel_uci = exp(upper_ci))
+
+
+data.range.before <- data.for.analysis.before %>%
+  filter(Increment == 40) %>% #group_by(Increment) %>%
+  summarize(max.temp = max(TempApplied), min.temp = min(TempApplied))
+
+
+agextempsmooth.before40 <- agextempsmooth.before40.nolimits %>%
+  mutate(max.temp = data.range.before$max.temp) %>%
+  mutate(min.temp = data.range.before$min.temp) %>%
+  mutate(Growth.limits = if_else(max.temp < TempC - 1.0, NA_real_, if_else(min.temp > TempC + 1.0, NA_real_, Rel_Gr))) %>%
+  drop_na()
+
+
+
+agextempsmooth.during40.nolimits <- predict_gam(GAMM2$gam, values = list(scaledAge = -0.34815531,
+                                                 scaledTemp = TempRange,
+                                                 # scaledHD = 0,
+                                                 HW = "during")) %>%
+  mutate(AgeDAYS = ((scaledAge * sd(seq(1, 99, by = 1))) + mean(seq(1, 99, by = 1)))) %>%
+  mutate(TempC = round(scaledTemp * sd((seq(2.75, 13.29, by = 1.14))) + mean(seq(2.75, 13.29, by = 1.14)), digits = 2)) %>%
+  mutate(Rel_Gr = exp(logrelGR), Rel_lci = exp(lower_ci), Rel_uci = exp(upper_ci))
+
+
+data.range.during <- data.for.analysis.during %>%
+  filter(Increment == 40) %>% #group_by(Increment) %>%
+  summarize(max.temp = max(TempApplied), min.temp = min(TempApplied))
+
+
+agextempsmooth.during40 <- agextempsmooth.during40.nolimits %>%
+  mutate(max.temp = data.range.during$max.temp) %>%
+  mutate(min.temp = data.range.during$min.temp) %>%
+  mutate(Growth.limits = if_else(max.temp < TempC - 1.0, NA_real_, if_else(min.temp > TempC + 1.0, NA_real_, Rel_Gr))) %>%
+  drop_na()
+
+
+
+agextempsmooth.between40.nolimits <- predict_gam(GAMM2$gam, values = list(scaledAge = -0.34815531,
+                                                 scaledTemp = TempRange,
+                                                 # scaledHD = 0,
+                                                 HW = "between")) %>%
+  mutate(AgeDAYS = ((scaledAge * sd(seq(1, 99, by = 1))) + mean(seq(1, 99, by = 1)))) %>%
+  mutate(TempC = round(scaledTemp * sd((seq(2.75, 13.29, by = 1.14))) + mean(seq(2.75, 13.29, by = 1.14)), digits = 2)) %>%
+  mutate(Rel_Gr = exp(logrelGR), Rel_lci = exp(lower_ci), Rel_uci = exp(upper_ci))
+
+
+data.range.between <- data.for.analysis.between %>%
+  filter(Increment == 40) %>% #group_by(Increment) %>%
+  summarize(max.temp = max(TempApplied), min.temp = min(TempApplied))
+
+
+agextempsmooth.between40 <- agextempsmooth.between40.nolimits %>%
+  mutate(max.temp = data.range.between$max.temp) %>%
+  mutate(min.temp = data.range.between$min.temp) %>%
+  mutate(Growth.limits = if_else(max.temp < TempC - 1.0, NA_real_, if_else(min.temp > TempC + 1.0, NA_real_, Rel_Gr))) %>%
+  drop_na()
+
+
+agextempsmooth.40 <- bind_rows(agextempsmooth.before40, agextempsmooth.during40, agextempsmooth.between40)
+
+
+# x11()
+agextempsmooth.40.plot.relGR <- ggplot() +
+  geom_line(data = agextempsmooth.40, aes(x = TempC, y = Growth.limits, color = as.factor(HW)), size = 1) +
+  geom_ribbon(data = agextempsmooth.40, aes(x = TempC, ymin = Rel_lci, ymax = Rel_uci, fill = as.factor(HW)), alpha = 0.25) +
+  scale_color_manual(values = c("black", "lightsteelblue3", "steelblue"), labels = c("Before", "During", "Between"), name = "Years binned by\nheatwave status") +
+  scale_fill_manual(values = c("black", "lightsteelblue3", "steelblue"), labels = c("Before", "During", "Between"), name = "Years binned by\nheatwave status") +
+  labs(x = "", y = "Relative growth\n(mm\u22C5mm\u207B\u00B9\u22C5d\u207B\u00B9)") +
+  ylim(0.008, 0.043) +
+  xlim(2.5, 14) +
+  theme_classic() +
+  theme(axis.text = element_text(size = 9), axis.title = element_text(size = 10),
+        legend.text = element_text(size = 9), legend.title = element_blank(),
+        axis.text.x = element_blank())
+agextempsmooth.40.plot.relGR
+
+
+
+
+
+
+### 
+# 75 days
+agextempsmooth.before75.nolimits <- predict_gam(GAMM2$gam, values = list(scaledAge = 0.87038828,
+                                                 scaledTemp = TempRange,
+                                                 HW = "before")) %>%
+  mutate(AgeDAYS = ((scaledAge * sd(seq(1, 99, by = 1))) + mean(seq(1, 99, by = 1)))) %>%
+  mutate(TempC = round(scaledTemp * sd((seq(2.75, 13.29, by = 1.14))) + mean(seq(2.75, 13.29, by = 1.14)), digits = 2)) %>%
+  mutate(Rel_Gr = exp(logrelGR), Rel_lci = exp(lower_ci), Rel_uci = exp(upper_ci))
+
+
+data.range.before <- data.for.analysis.before %>%
+  filter(Increment == 75) %>% #group_by(Increment) %>%
+  summarize(max.temp = max(TempApplied), min.temp = min(TempApplied))
+
+
+agextempsmooth.before75 <- agextempsmooth.before75.nolimits %>%
+  mutate(max.temp = data.range.before$max.temp) %>%
+  mutate(min.temp = data.range.before$min.temp) %>%
+  mutate(Growth.limits = if_else(max.temp < TempC - 1.0, NA_real_, if_else(min.temp > TempC + 1.0, NA_real_, Rel_Gr))) %>%
+  drop_na()
+
+
+
+agextempsmooth.during75.nolimits <- predict_gam(GAMM2$gam, values = list(scaledAge = 0.87038828,
+                                                 scaledTemp = TempRange,
+                                                 HW = "during")) %>%
+  mutate(AgeDAYS = ((scaledAge * sd(seq(1, 99, by = 1))) + mean(seq(1, 99, by = 1)))) %>%
+  mutate(TempC = round(scaledTemp * sd((seq(2.75, 13.29, by = 1.14))) + mean(seq(2.75, 13.29, by = 1.14)), digits = 2)) %>%
+  mutate(Rel_Gr = exp(logrelGR), Rel_lci = exp(lower_ci), Rel_uci = exp(upper_ci))
+
+
+data.range.during <- data.for.analysis.during %>%
+  filter(Increment == 75) %>% #group_by(Increment) %>%
+  summarize(max.temp = max(TempApplied), min.temp = min(TempApplied))
+
+
+agextempsmooth.during75 <- agextempsmooth.during75.nolimits %>%
+  mutate(max.temp = data.range.during$max.temp) %>%
+  mutate(min.temp = data.range.during$min.temp) %>%
+  mutate(Growth.limits = if_else(max.temp < TempC - 1.0, NA_real_, if_else(min.temp > TempC + 1.0, NA_real_, Rel_Gr))) %>%
+  drop_na()
+
+
+
+agextempsmooth.between75.nolimits <- predict_gam(GAMM2$gam, values = list(scaledAge = 0.87038828,
+                                                 scaledTemp = TempRange,
+                                                 HW = "between")) %>%
+  mutate(AgeDAYS = ((scaledAge * sd(seq(1, 99, by = 1))) + mean(seq(1, 99, by = 1)))) %>%
+  mutate(TempC = round(scaledTemp * sd((seq(2.75, 13.29, by = 1.14))) + mean(seq(2.75, 13.29, by = 1.14)), digits = 2)) %>%
+  mutate(Rel_Gr = exp(logrelGR), Rel_lci = exp(lower_ci), Rel_uci = exp(upper_ci))
+
+
+data.range.between <- data.for.analysis.between %>%
+  filter(Increment == 75) %>% #group_by(Increment) %>%
+  summarize(max.temp = max(TempApplied), min.temp = min(TempApplied))
+
+
+agextempsmooth.between75 <- agextempsmooth.between75.nolimits %>%
+  mutate(max.temp = data.range.between$max.temp) %>%
+  mutate(min.temp = data.range.between$min.temp) %>%
+  mutate(Growth.limits = if_else(max.temp < TempC - 1.0, NA_real_, if_else(min.temp > TempC + 1.0, NA_real_, Rel_Gr))) %>%
+  drop_na()
+
+
+
+agextempsmooth.75 <- bind_rows(agextempsmooth.before75, agextempsmooth.during75, agextempsmooth.between75)
+
+
+# x11()
+agextempsmooth.75.plot.relGR <- ggplot() +
+  geom_line(data = agextempsmooth.75, aes(x = TempC, y = Growth.limits, color = as.factor(HW)), size = 1) +
+  geom_ribbon(data = agextempsmooth.75, aes(x = TempC, ymin = Rel_lci, ymax = Rel_uci, fill = as.factor(HW)), alpha = 0.25) +
+  scale_color_manual(values = c("black", "lightsteelblue3", "steelblue"), labels = c("Before", "During", "Between"), name = "Years binned by\nheatwave status") +
+  scale_fill_manual(values = c("black", "lightsteelblue3", "steelblue"), labels = c("Before", "During", "Between"), name = "Years binned by\nheatwave status") +
+  labs(x = "Temperature (\u00B0C)", y = "Relative growth\n(mm\u22C5mm\u207B\u00B9\u22C5d\u207B\u00B9)") +
+  ylim(0.008, 0.043) +
+  xlim(2.5, 14) +
+  theme_classic() +
+  theme(axis.text = element_text(size = 9), axis.title = element_text(size = 10),
+        legend.text = element_text(size = 9), legend.title = element_blank())
+agextempsmooth.75.plot.relGR
+
+
+
+
+
+
+
+
+
+```
+
+
+
+
+```{r GrowthsPlots}
+
+
+yearly.growth.plot.data <- data_w_allTemp %>%
+  select(-HW) %>%
+  mutate(HW = ordered(as.factor(if_else(Year < 2015, "before", if_else(Year %in% c(2017, 2018), "between", "during"))), levels = c("before", "during", "between"))) #%>%
+  # mutate(HW = relevel(as.factor(HW), "before"))
+
+
+
+
+Growth.Age.plot1 <- ggplot() +
+  geom_smooth(data = yearly.growth.plot.data, aes(x = Increment, y = bc_gr, group_by = as.factor(Year), color = HW), method = "loess") + #color = as.factor(Year))) + #
+  scale_color_manual(values = c("black", "lightsteelblue3", "steelblue"), labels = c("Before", "During", "Between"), name = "Years binned by\nheatwave status") +
+  labs(x = "Age (days)", y = "Absolute Growth\n(mm/d)") +
+  scale_y_continuous(labels = scales::number_format(accuracy = 0.01)) +
+  theme_classic() +
+  theme(axis.text = element_text(size = 9), axis.title = element_text(size = 10),
+        legend.text = element_text(size = 9), legend.title = element_blank())#,
+Growth.Age.plot1
+
+
+
+
+
+
+
+
+
+
+Growth.Age.plot2 <- ggplot() +
+  geom_smooth(data = yearly.growth.plot.data, aes(x = Increment, y = relGR, group_by = as.factor(Year), color = HW), method = "loess") + #color = as.factor(Year))) + #
+  scale_color_manual(values = c("black", "lightsteelblue3", "steelblue"), labels = c("Before", "During", "Between"), name = "Years binned by\nheatwave status") +
+  labs(x = "Age (days)", y = "Relative Growth\n(mm/mm/d)") +
+  theme_classic() +
+  theme(axis.text = element_text(size = 9), axis.title = element_text(size = 10),
+        legend.text = element_text(size = 9), legend.title = element_blank())
+Growth.Age.plot2
+
+
+
+
+library(ggpubr)     # needed to plot panels together
+library(cowplot)    # needed to plot panels together
+
+
+Growths.plots <- ggarrange(Growth.Age.plot1, Growth.Age.plot2,
+                           agextempsmooth.10.plot, agextempsmooth.10.plot.relGR, 
+                           agextempsmooth.40.plot, agextempsmooth.40.plot.relGR, 
+                           agextempsmooth.75.plot, agextempsmooth.75.plot.relGR, ncol = 2, nrow = 4, common.legend = TRUE, legend = "right") +
+  draw_plot_label(label = c("(A)", "(B)", "(C) Day 10", "(D)", "(E) Day 40", "(F)", "(G) Day 75", "(H)"), size = 12, x = c(0.1, 0.55, 0.06, 0.55, 0.06, 0.55, 0.06, 0.55), y = c(0.99, 0.99, 0.75, 0.75, 0.5, 0.5, 0.25, 0.25))
+
+Growths.plots
+
+
+# ggsave("13_GAMMs_TempxAgexGrowth.tif", plot = last_plot(), device = "tiff",
+#        width = 6.5, height = 8, units = "in", dpi = 300)
+
+
+```
+
+
+```{r RawGrowthsPlots}
+
+
+Data.summaries <- yearly.growth.plot.data %>%
+  filter(age_doy > 39) %>%
+  group_by(HW) %>%
+  summarise(avgGr = mean(bc_gr))
+
+
+
+
+
+Raw.Growth.Age.plot1 <- ggplot(data = yearly.growth.plot.data) +
+  geom_line(aes(x = Increment, y = bc_gr, group_by = as.factor(ID), color = "lightgray"), size = 0.25) + #
+  geom_smooth(aes(x = Increment, y = bc_gr, group_by = as.factor(ID), color = "darkgray"), size = 0.25, method = "loess", alpha = 0) +
+  geom_smooth(aes(x = Increment, y = bc_gr, group_by = as.factor(Year), color = "black"), method = "loess") +
+  facet_wrap(vars(Year)) +
+  scale_color_manual(values = c("black","darkgray", "lightgray")) +
+  labs(x = "Age (days)", y = "Absolute Growth\n(mm/d)") +
+  scale_y_continuous(labels = scales::number_format(accuracy = 0.01)) +
+  theme_classic() +
+  theme(axis.text = element_text(size = 9), axis.title = element_text(size = 10),
+        legend.position = "none")
+Raw.Growth.Age.plot1
+
+
+# ggsave("11_Raw_Abs_Growth.tif", plot = last_plot(), device = "tiff",
+#        width = 6.5, height = 4, units = "in", dpi = 300)
+
+
+
+
+Raw.Growth.Age.plot2 <- ggplot(data = yearly.growth.plot.data) +
+  geom_line(aes(x = Increment, y = relGR, group_by = as.factor(ID), color = "lightgray"), size = 0.25) + #
+  geom_smooth(aes(x = Increment, y = relGR, group_by = as.factor(ID), color = "darkgray"), size = 0.25, method = "loess", alpha = 0) + #
+  geom_smooth(aes(x = Increment, y = relGR, group_by = as.factor(Year), color = "black"), method = "loess") +
+  facet_wrap(vars(Year)) +
+  scale_color_manual(values = c("black","darkgrey", "lightgray")) +
+  labs(x = "Age (days)", y = "Relative Growth\n(mm/mm/d)") +
+  theme_classic() +
+  theme(axis.text = element_text(size = 9), axis.title = element_text(size = 10),
+        legend.position = "none")
+Raw.Growth.Age.plot2
+
+# ggsave("11_Raw_Rel_Growth.tif", plot = last_plot(), device = "tiff",
+#        width = 6.5, height = 4, units = "in", dpi = 300)
+
+
+
+```
+
+
+
+
+
+
+
